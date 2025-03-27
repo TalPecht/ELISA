@@ -52,10 +52,13 @@ Sheet2, name = Plate info
 Sheet3, name = Plate layout
 Sheet4, name = End point
 
+in case running the wrapper function, use option1, if running just for single file use option2
 ```{r}
-elisa_exp <- read_excel_allsheets(params$excel_file)
+# option 1
+#elisa_exp <- read_excel_allsheets(params$excel_file)
 
-#elisa_exp <- read_excel_allsheets("./IL1b/Data/FEMELISA_IL1b_plate1.xlsx")
+# option 2
+elisa_exp <- read_excel_allsheets("./example_elisa_File.xlsx")
 ```
 ### adjustments to ELISA exp
 ```{r}
