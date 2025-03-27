@@ -1,0 +1,510 @@
+---
+title: "`r paste('ELISA TNF Analysis -', params$title)`"
+date: "`r Sys.Date()`"
+output: 
+  html_document:
+    toc: true
+    toc_depth: 2
+    toc_float: 
+      collapsed: false
+      smooth_scroll: true
+params:
+  excel_file: "default.xlsx"
+  title: "Report"
+---
+
+
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+# 1.R requirements 
+
+## installation
+```{r}
+packages = c("ggplot2", "dplyr","drc", "readxl","ggpmisc","reshape2")
+install.packages(setdiff(packages, rownames(installed.packages())))  
+```
+
+## load packages
+```{r}
+lapply(packages, require, character.only = TRUE)
+```
+## functions
+```{r}
+read_excel_allsheets <- function(filename, tibble = FALSE) {
+    sheets <- readxl::excel_sheets(filename)
+    x <- lapply(sheets, function(X) readxl::read_excel(filename, sheet = X))
+    if(!tibble) x <- lapply(x, as.data.frame)
+    names(x) <- gsub(" ","_", as.character(sheets))
+    x
+}
+```
+
+# 2. Load data
+## 2.1. Load ELISA excel file
+ELISA excel file should have the following format: 
+Sheet1, name = Exp info
+Sheet2, name = Plate info
+Sheet3, name = Plate layout
+Sheet4, name = End point
+
+```{r}
+elisa_exp <- read_excel_allsheets(params$excel_file)
+
+#elisa_exp <- read_excel_allsheets("./IL1b/Data/FEMELISA_IL1b_plate1.xlsx")
+```
+### adjustments to ELISA exp
+```{r}
+## Take first column from the "Plate_layout" and make as row.names
+rownames(elisa_exp$Plate_layout) <- elisa_exp$Plate_layout[,1]
+elisa_exp$Plate_layout[,1] <- NULL
+```
+
+
+
+
+# 3. Calculate delta O.D. values
+```{r}
+# read1 reads
+ELISA_read1 <- as.matrix(sapply(elisa_exp$End_point[c(13:20),c(2:13)], as.numeric))
+rownames(ELISA_read1)<-LETTERS[seq( from = 1, to = 8)]
+colnames(ELISA_read1) <- c(1:12)
+
+# ref reads
+ELISA_ref <- as.matrix(sapply(elisa_exp$End_point[c(24:31),c(2:13)], as.numeric))
+rownames(ELISA_ref)<-LETTERS[seq( from = 1, to = 8)]
+colnames(ELISA_ref) <- c(1:12)
+
+
+ELISA_delta <- ELISA_read1 - ELISA_ref
+
+print(ELISA_delta)
+```
+## 3.1. exclude wells if need
+```{r}
+exclude_Wells <- elisa_exp$Exp_info[which(elisa_exp$Exp_info == "exceclude_wells"),]$details
+
+if(!is.na(exclude_Wells)){
+ print(paste(paste(exclude_Wells, collapse = " and "), " will be excluded", collapse= " ")) 
+} else {
+  print("no wells are sample wells are excluded from analysis")
+}
+
+```
+```{r}
+if(!is.na(exclude_Wells)){
+  for(i in exclude_Wells){
+   ELISA_delta[substr(i,1,1),substr(i,2,2)] <- NA 
+  }
+}
+
+print(ELISA_delta)
+```
+
+
+### substract blank
+a blank sample plays a crucial role in spectroscopic measurements. It helps to calibrate the instrument, eliminate background interference, and improve the accuracy of the results. Therefore, it is an essential part of any spectroscopic analysis.
+
+```{r}
+blank_cells <- which(elisa_exp$Plate_layout == "Blank", arr.ind = TRUE) 
+
+blank_value <- mean(ELISA_delta[blank_cells], na.rm = T)
+
+blank_value
+```
+```{r}
+ELISA_delta_minusblank <- ELISA_delta - blank_value
+
+print(ELISA_delta_minusblank)
+```
+```{r}
+## replace negative values with NA
+ELISA_delta_minusblank[ELISA_delta_minusblank < 0] <- NA
+
+print(ELISA_delta_minusblank)
+```
+
+
+```{r}
+elisa_exp$ELISA_delta <- ELISA_delta_minusblank
+```
+
+# 4. Calculate std curve
+```{r}
+max_std = as.numeric(elisa_exp$Exp_info[elisa_exp$Exp_info$Info == "STD_max_conc","details"])
+n_std_points = 7
+
+std_values = max_std
+
+for (i in 1:(n_std_points-1) ){
+  std = std_values[length(std_values)] /2
+  std_values = c(std_values,std)
+}
+
+std_values
+```
+## 4.1. plot layout
+```{r}
+as.data.frame(elisa_exp$Plate_layout)
+```
+
+
+## 4.2. create std table
+```{r}
+## which cells are std
+std_inx <- which(apply(elisa_exp$Plate_layout, 2, function(x) { sapply(x,function(y) grepl("STD",y))} ), arr.ind = TRUE) 
+
+std_od <- c()
+for(i in unique(std_inx[,"col"])){
+ tmp <-  elisa_exp$ELISA_delta[std_inx[std_inx[,"col"] == i,"row"],i]
+ std_od <- cbind(std_od, tmp)
+ colnames(std_od)[ncol(std_od)] <- i
+}
+
+std_od
+
+```
+```{r}
+std_df = data.frame(C = std_values, 
+                    OD = apply(std_od, 
+                               1, mean, na.rm = T), 
+                    std = paste0("STD",rev(c(1:7))) )
+
+std_df
+```
+
+ 
+
+## 4.3. Plot std curve
+### 4.3.1. raw values
+```{r}
+ggplot(std_df, aes(x=C, y= OD))+ geom_point()+ geom_smooth()
+```
+### 4.3.2. log vs log (linear fit)
+```{r}
+ggplot(std_df, aes(x=log(C), y= log(OD)))+ 
+  geom_point()+ 
+  geom_text(aes(label = std), vjust = -1)+
+   stat_poly_line() +
+  stat_poly_eq(use_label(c("eq", "R2")))+
+  ggtitle("std curve all valid values")
+```
+### ... >> mark outliers
+```{r}
+## in case there are outliers,remove them from the std curve - choose and write the label
+std_outlier <- elisa_exp$Exp_info[which(elisa_exp$Exp_info$Info == "exclude_std"), "details"]
+
+if(!is.na(std_outlier)){
+  
+  std_outlier <- unlist(strsplit(gsub('["\\\\ ]', '', std_outlier),","))
+  
+  std_df$outlier <- ifelse(std_df$std %in% std_outlier,"outlier","")
+
+
+p <- ggplot(subset(std_df, outlier != "outlier" ), aes(x=log(C), y= log(OD)))+ 
+  geom_point()+ 
+  geom_text(aes(label = std), vjust = -1)+
+   stat_poly_line() +
+  stat_poly_eq(use_label(c("eq", "R2")))+
+  ggtitle(paste0("std curve no outliers (w/o ",paste(std_outlier, collapse = ","),")"))
+
+print(p)
+
+## final std curve, remove values that are not valid or outliers
+final_std_df <- subset(std_df, outlier != "outlier" & !is.nan(OD))
+  
+} else {
+  final_std_df <- std_df
+}
+
+```
+```{r}
+print(final_std_df)
+```
+
+### 4.3.3. 4-PL fit
+```{r}
+# log transform conc. 
+final_std_df$logC <-log10(final_std_df$C)# log10 from conc
+
+#remove 0 value
+final_std_df = final_std_df[final_std_df$C!=0,]
+ 
+plot(final_std_df$logC, final_std_df$OD, main="log standard curve", xlab="x=log(conc)", ylab="y=OD")
+ 
+ 
+fit<-drm(formula =   OD ~ logC , data = final_std_df, fct = LL.4())
+
+# creat X from logconc
+x <- seq(min(final_std_df$logC),max(final_std_df$logC), length=100)
+
+# create y values from OD ~ d + (a - d)/(1 + (logconc/cc)^b)
+y <- (fit$coefficients[2]+ (fit$coefficients[3]- fit$coefficients[2])/(1+(x/fit$coefficients[4])^ fit$coefficients[1]))
+
+df_plot = data.frame(x=x, y= y)
+
+
+ggplot(df_plot, aes(x=x, y=y))+ geom_point()+ geom_smooth()
+
+```
+```{r}
+# Log transform concentration
+final_std_df$logC <- log10(final_std_df$C)
+
+# Remove zero values (to avoid log issues)
+final_std_df <- final_std_df[final_std_df$C != 0,]
+
+# Fit a four-parameter log-logistic model
+fit <- drm(OD ~ logC, data = final_std_df, fct = LL.4())
+
+# Generate predicted values
+final_std_df$predicted_OD <- predict(fit)
+
+
+
+# Calculate residuals (observed - predicted)
+final_std_df$residuals <- final_std_df$OD - final_std_df$predicted_OD
+
+# Compute R²
+SST <- sum((final_std_df$OD - mean(final_std_df$OD))^2)  # Total sum of squares
+SSE <- sum(final_std_df$residuals^2)  # Sum of squared errors
+R2 <- 1 - (SSE / SST)  # R-squared value
+
+# Extract model parameters (drm coefficient names: b, c, d, e)
+b <- coef(fit)[1]  # Slope
+c <- coef(fit)[2]  # Lower asymptote
+d <- coef(fit)[3]  # Upper asymptote
+e <- coef(fit)[4]  # Inflection point
+
+# Convert equation to a formatted character string
+eq_label <- paste0("OD = ", round(d, 3), " + (", round(c, 3), " - ", round(d, 3), 
+                   ") / (1 + (logC / ", round(e, 3), ")^", round(b, 3), ")")
+r2_label <- paste0("R² = ", round(R2, 3))
+
+# Plot: Original data with `geom_smooth()` and residuals
+ggplot(final_std_df, aes(x = logC, y = OD)) +
+  # Original data points
+  geom_point(color = "blue", size = 3, alpha = 0.7) +
+  
+ # Smoothed model fit (uses LOESS but can approximate the nonlinear model)
+  geom_smooth(method = "loess", color = "red", size = 1) +
+
+  # Residual lines (observed to predicted)
+  geom_segment(aes(x = logC, xend = logC, y = predicted_OD, yend = OD), 
+               color = "purple", linetype = "dashed") +
+  labs(title = paste0(eq_label," \n", r2_label),
+       x = "Log(Concentration)", 
+       y = "Optical Density (OD)") +
+  theme_minimal()
+
+```
+
+
+```{r}
+print(fit)
+```
+### 4.3.4. recovery %
+ https://www.biolegend.com/en-gb/blog/curve-fitting-for-immunoassays-legendplex
+ The recovery of standards allows one to measure the accuracy of the observed concentration that was calculated for the expected concentrations of each standard. Basically, you calculate the concentration of each standard and compare it to the actual concentration using the following equation:
+recovery = OD_observed*100/OD_expected
+The closer the recovery is to 100%, the better the curve fit model being used. The general rule of thumb says for accurate quantification, the recovery should fall between 80-120%. Using logistic regression (4PL or 5PL), rather than linear regression, will allow for more accurate quantitation across a wider range.
+```{r}
+## std curve observed vs expected
+# generate recovery values,
+final_std_df$recovery <- final_std_df$OD*100/final_std_df$predicted_OD
+
+ggplot(final_std_df, aes(x= as.factor(C), y= recovery))+
+  #geom_bar(stat = "identity")+
+  geom_rect(aes(ymin=80, ymax=120, xmin = -Inf, xmax = Inf),  fill="purple", alpha = 0.01)+
+  geom_point(size = 4, aes(color = ifelse(recovery < 80 | recovery > 120, "off", "in-range")))+
+  geom_text(aes(label = paste0(round(recovery,1),"%"), color = ifelse(recovery < 80 | recovery > 120, "off", "in-range")), hjust = -.2)+
+  coord_flip()+
+  scale_color_manual(values = c("off" = "red", "in-range" = "blue"), name = "")+
+  theme_bw()+
+  xlab("STD conc.")+ylab("recovery %")
+```
+
+# 5. calculate samples
+
+## 5.1. location of samples in the plate
+for each sample find its location in the plate_layout
+```{r}
+## find indicaces
+sample_table <- elisa_exp$Plate_info
+
+list_samples <- list()
+
+for(i in unique(sample_table$sample_name)){
+  list_samples[["indx"]][[i]] <- which(apply(elisa_exp$Plate_layout, 2, function(x) { sapply(x,function(y) grepl(i,y))} ), arr.ind = TRUE)
+}
+
+
+```
+## 5.2. OD values of the samples
+```{r}
+## convert to table of the values
+list_samples[["OD"]] <- lapply(list_samples$indx, function(x){
+  tmpod <- c()
+  for(i in unique(x[,"col"])){
+   tmp <- elisa_exp$ELISA_delta[x[x[,"col"] == i,"row"],i]
+   tmpod <- c(tmpod,tmp)
+  }
+  tmpod
+})
+```
+
+## 5.3. calculate avg OD
+```{r}
+## average OD
+list_samples[["avg_OD"]] <- lapply(list_samples[["OD"]], mean, na.rm = T)
+```
+
+## 5.4. calculate logC based on the formula
+```{r}
+## calculate based on equation
+
+list_samples[["logC"]] <- lapply(list_samples[["OD"]], function(x){
+  as.numeric(fit$coefficients[4]*(((-1* fit$coefficients[3]+x)/( fit$coefficients[2]-x))^(1/ fit$coefficients[1])))
+})
+```
+
+# 5.5. calculate C
+```{r}
+## exponentiation
+
+list_samples[["C"]] <- lapply(list_samples[["logC"]], function(x) 10^x)
+```
+
+```{r}
+## average
+
+list_samples[["avg_C"]] <- lapply(list_samples[["C"]], mean, na.rm = T)
+
+## SD
+
+list_samples[["sd_C"]] <- lapply(list_samples[["C"]], sd, na.rm = T)
+```
+
+## 5.6. Add values to sample table
+```{r}
+## add values to sample table
+elisa_C <- as.data.frame(reshape2::melt(list_samples[["avg_C"]]))
+colnames(elisa_C) <- c("elisa_C","sample_name")
+
+sample_table <- merge(sample_table, elisa_C, by = "sample_name", all.x = T, all.y = T)
+
+elisa_OD <- as.data.frame(reshape2::melt(list_samples[["avg_OD"]]))
+colnames(elisa_OD) <- c("avg_OD","sample_name")
+
+sample_table <- merge(sample_table, elisa_OD, by = "sample_name", all.x = T, all.y = T)
+
+elisa_C_sd <- as.data.frame(reshape2::melt(list_samples[["sd_C"]]))
+colnames(elisa_C_sd) <- c("elisa_C_sd","sample_name")
+
+sample_table <- merge(sample_table, elisa_C_sd, by = "sample_name", all.x = T, all.y = T)
+
+head(sample_table)
+```
+## 5.7. calculate final C by dilution
+```{r}
+sample_table$final_C <- sample_table$elisa_C*sample_table$dilution
+
+head(sample_table)
+```
+
+## 5.8. Mark samples that are out of range
+```{r}
+max_value <-max(final_std_df$OD, na.rm = T)
+
+min_value <-min(final_std_df$OD, na.rm = T)
+
+sample_table$max_od <- max_value
+sample_table$min_od <- min_value
+
+sample_table <- as.data.frame(sample_table %>%
+                                mutate(range =
+                                         case_when(
+                                           avg_OD > max_value ~ "high", 
+                                           avg_OD < min_value ~ "low", 
+                                           TRUE ~ NA
+                                         )))
+```
+
+## 5.9. mark which samples to keep - 
+if participant had more than one visit out of range we exclude the all set
+```{r}
+keep_or_loose <- as.data.frame(sample_table %>% group_by(PID) %>% summarize(n_out_of_range = sum(!is.na(range))))
+
+keep <- keep_or_loose[keep_or_loose$n_out_of_range == 0,]$PID
+
+sample_table$keep <- ifelse(sample_table$PID %in% keep,TRUE,FALSE)
+```
+
+print which samples are excluded? 
+```{r}
+id_excluded <- unique(sample_table[sample_table$keep == FALSE, ]$PID)
+print(id_excluded)
+```
+
+# 6. Plot
+```{r}
+max_value_c <-  std_df[which(std_df$OD == max_value),"C"]
+  
+min_value_c <-  std_df[which(std_df$OD == min_value),"C"]
+```
+
+```{r fig.height=7}
+ggplot(sample_table, aes(x= sample_name, y= elisa_C, color = range))+
+  geom_pointrange(aes(ymin=elisa_C-elisa_C_sd, ymax=elisa_C+elisa_C_sd))+
+  geom_hline(yintercept = c(max_value_c, min_value_c), linetype = "dashed")+
+  coord_flip()+
+  scale_color_manual(values = c(
+                                "high" = "tomato2", 
+                                "low" = "cornflowerblue"), na.value = "black")+
+  theme(aspect.ratio = 2)
+```
+
+# 7. Export C results for samples
+## 7.1. add technical information
+```{r}
+sample_table$exp <- elisa_exp$Exp_info[elisa_exp$Exp_info$Info == "experiment","details"]
+sample_table$plate <- elisa_exp$Exp_info[elisa_exp$Exp_info$Info == "plate","details"]
+sample_table$cytokine <- elisa_exp$Exp_info[elisa_exp$Exp_info$Info == "Cytokine","details"]
+sample_table$units <- elisa_exp$Exp_info[elisa_exp$Exp_info$Info == "units","details"]
+```
+
+## 7.2. save table
+```{r}
+# Define the directory path
+dir_path <- paste0("./",unique(sample_table$cytokine), "/Results")
+
+# Check if it exists; if not, create it
+if (!dir.exists(dir_path)) {
+  dir.create(dir_path)
+  message("Directory created: ", dir_path)
+} else {
+  message("Directory already exists: ", dir_path)
+}
+```
+
+```{r}
+filename <- paste0(dir_path,"/",paste(Sys.Date(),
+                   unique(sample_table$cytokine),
+                   paste0("plate",unique(sample_table$plate)),
+                  paste0("exp",unique(sample_table$exp)),sep = "_"),".csv")
+
+filename
+
+write.csv(sample_table,file=filename, row.names = F)
+```
+
+
+# 8. Session info
+```{r}
+sessionInfo()
+```
+
